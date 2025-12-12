@@ -1,53 +1,53 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 
 struct ContentView: View {
     @State private var folderURL: URL? = nil
-    @State private var byteCountString: String = "1"
     @State private var progress: Double = 0
     @State private var statusText: String = "请选择文件夹"
     @State private var totalFiles: Int = 0
     @State private var isDragOver = false
+    @State private var isScanning = false
 
     @StateObject private var processor = FileProcessor()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-
             Text("批量 MD5 修改器")
                 .font(.system(size: 22, weight: .semibold))
+            
+            // 文件夹选择区域
+            if processor.fileInfos.isEmpty {
+                // 拖拽区域 - 未选择文件夹时显示
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(isDragOver ? Color.blue.opacity(0.1) : Color.gray.opacity(0.05))
+                        .stroke(
+                            isDragOver ? Color.blue : Color.gray.opacity(0.3),
+                            style: StrokeStyle(lineWidth: 2, dash: [8])
+                        )
+                        .frame(height: 200)
 
-            // 拖拽区域 - 始终保持初始状态
-            ZStack {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(isDragOver ? Color.blue.opacity(0.1) : Color.gray.opacity(0.05))
-                    .stroke(
-                        isDragOver ? Color.blue : Color.gray.opacity(0.3),
-                        style: StrokeStyle(lineWidth: 2, dash: [8])
-                    )
-                    .frame(height: 200)
-
-                VStack(spacing: 8) {
-                    Image(systemName: "folder.badge.plus")
-                        .font(.title)
-                        .foregroundColor(.secondary)
-                    
-                    Text("单击或拖拽选择文件夹")
-                        .font(.headline)
-                        .foregroundColor(.primary)
-//                    Text("支持单击选择或直接拖拽文件夹到此区域")
-//                        .font(.caption)
-//                        .foregroundColor(.secondary)
+                    VStack(spacing: 8) {
+                        Image(systemName: "folder.badge.plus")
+                            .font(.title)
+                            .foregroundColor(.secondary)
+                        
+                        Text("单击或拖拽选择文件夹")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                    }
+                }
+                .onTapGesture {
+                    openFolderPanel()
+                }
+                .onDrop(of: [.fileURL], isTargeted: $isDragOver) { providers in
+                    handleDrop(providers: providers)
                 }
             }
-            .onTapGesture {
-                openFolderPanel()
-            }
-            .onDrop(of: [.fileURL], isTargeted: $isDragOver) { providers in
-                handleDrop(providers: providers)
-            }
 
-            // 状态信息和按钮区域 - 顶对齐
+            // 状态信息和按钮区域
             HStack(alignment: .top, spacing: 16) {
                 // 状态信息 - 左对齐
                 VStack(alignment: .leading, spacing: 6) {
@@ -72,19 +72,30 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 
-                // 按钮 - 右对齐，加大尺寸
-                Button(action: startOrStop) {
-                    if processor.isRunning {
-                        Label("停止处理", systemImage: "stop.fill")
-                    } else {
-                        Label("开始处理", systemImage: "play.fill")
+                // 按钮组
+                HStack(spacing: 8) {
+                    if !processor.fileInfos.isEmpty {
+                        Button(action: clearImages) {
+                            Label("清空", systemImage: "xmark.circle")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                        .frame(minWidth: 50)
                     }
+                    
+                    Button(action: startOrStop) {
+                        if processor.isRunning {
+                            Label("停止处理", systemImage: "stop.fill")
+                        } else {
+                            Label("开始处理", systemImage: "play.fill")
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(folderURL == nil || processor.isRunning || processor.fileInfos.isEmpty)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .frame(minWidth: 120)
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(folderURL == nil || processor.isRunning)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large) // 加大按钮尺寸
-                .frame(minWidth: 120) // 设置最小宽度
             }
             .padding(.top, 8)
 
@@ -106,16 +117,29 @@ struct ContentView: View {
                         .frame(height: 8)
                 }
             }
-
+            
+            // 照片网格显示
+            if !processor.fileInfos.isEmpty {
+                ScrollView {
+                    LazyVGrid(columns: [
+                        GridItem(.adaptive(minimum: 200), spacing: 16)
+                    ], spacing: 16) {
+                        ForEach(processor.fileInfos) { fileInfo in
+                            ImageCardView(fileInfo: fileInfo)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+            }
+            
             Spacer()
         }
         .padding()
         .onChange(of: folderURL) { newValue in
-            // 当选择新文件夹时，重置所有状态并更新提示
             if let url = newValue {
-                resetAllState()
-                statusText = "已选择文件夹：\(url.lastPathComponent)"
+                scanImagesInFolder(url)
             } else {
+                processor.clearFileInfos()
                 resetAllState()
                 statusText = "请选择文件夹"
             }
@@ -131,7 +155,6 @@ struct ContentView: View {
                     statusText = "处理中…"
                 }
             } else if processor.processedCount > 0 && progress > 0 {
-                // 处理完成时显示最终结果
                 if processor.processedCount == totalFiles && totalFiles > 0 {
                     if let folderName = folderURL?.lastPathComponent {
                         statusText = "文件夹 \(folderName) 处理完成！"
@@ -145,6 +168,106 @@ struct ContentView: View {
             if let file = file {
                 statusText = "正在处理：\(file)"
             }
+        }
+    }
+}
+
+// MARK: - 照片卡片视图
+struct ImageCardView: View {
+    let fileInfo: FileInfo
+    @State private var nsImage: NSImage? = nil
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // 照片预览
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.gray.opacity(0.1))
+                    .frame(height: 200)
+                
+                if let image = nsImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxHeight: 200)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: "photo")
+                            .font(.system(size: 32))
+                            .foregroundColor(.secondary)
+                        Text("加载中...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            
+            // 文件名
+            Text(fileInfo.url.lastPathComponent)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            
+            // MD5信息
+            VStack(alignment: .leading, spacing: 4) {
+                // 转换前MD5
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("转换前:")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    Text(fileInfo.originalMD5)
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundColor(.primary)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(4)
+                
+                // 转换后MD5
+                if let modifiedMD5 = fileInfo.modifiedMD5 {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("转换后:")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        Text(modifiedMD5)
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundColor(.blue)
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .padding(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(4)
+                } else {
+                    Text("未处理")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .padding(6)
+                        .frame(maxWidth: .infinity)
+                        .background(Color.gray.opacity(0.05))
+                        .cornerRadius(4)
+                }
+            }
+        }
+        .padding(8)
+        .background(Color.gray.opacity(0.05))
+        .cornerRadius(8)
+        .onAppear {
+            loadImage()
+        }
+    }
+    
+    private func loadImage() {
+        if let image = NSImage(contentsOf: fileInfo.url) {
+            nsImage = image
         }
     }
 }
@@ -193,17 +316,30 @@ extension ContentView {
         var isDirectory: ObjCBool = false
         let fileManager = FileManager.default
         
-        // 检查路径是否存在且是目录
         if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) {
             if isDirectory.boolValue {
-                // 是文件夹
                 folderURL = url
             } else {
-                // 是文件，使用其父目录
                 folderURL = url.deletingLastPathComponent()
             }
         } else {
             statusText = "无法访问拖拽的路径"
+        }
+    }
+    
+    // MARK: 扫描文件夹中的照片
+    func scanImagesInFolder(_ url: URL) {
+        isScanning = true
+        statusText = "正在扫描照片..."
+        processor.scanImagesInFolder(url) { fileInfos in
+            DispatchQueue.main.async {
+                self.isScanning = false
+                if fileInfos.isEmpty {
+                    self.statusText = "文件夹中没有找到照片文件"
+                } else {
+                    self.statusText = "找到 \(fileInfos.count) 张照片，可以开始处理"
+                }
+            }
         }
     }
 
@@ -225,7 +361,6 @@ extension ContentView {
             return
         }
 
-        // 使用固定值1字节
         let byteCount = 1
         
         if let folderName = folderURL?.lastPathComponent {
@@ -255,6 +390,14 @@ extension ContentView {
         }
     }
     
+    // MARK: 清空照片列表
+    func clearImages() {
+        processor.clearFileInfos()
+        folderURL = nil
+        resetAllState()
+        statusText = "请选择文件夹"
+    }
+    
     // MARK: 重置UI状态
     private func resetUIState() {
         progress = 0
@@ -265,7 +408,6 @@ extension ContentView {
     // MARK: 重置所有状态（包括处理器状态）
     private func resetAllState() {
         resetUIState()
-        // 重置处理器的状态
         processor.resetProcessingState()
     }
 }
